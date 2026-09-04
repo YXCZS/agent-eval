@@ -1,0 +1,119 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000}
+        NEXT_PUBLIC_PROJECT_ID: ${NEXT_PUBLIC_PROJECT_ID:-project-1}
+        NEXT_PUBLIC_WORKSPACE_SESSION: ${NEXT_PUBLIC_WORKSPACE_SESSION:-dev:project-1:local-compose-session-secret}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://agent_eval:agent_eval@postgres:5432/agent_eval}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      API_KEY_SALT: ${API_KEY_SALT:-local-compose-api-key-salt}
+      WORKSPACE_SESSION_SECRET: ${WORKSPACE_SESSION_SECRET:-local-compose-session-secret}
+      NEXT_PUBLIC_WORKSPACE_SESSION: ${NEXT_PUBLIC_WORKSPACE_SESSION:-dev:project-1:local-compose-session-secret}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://agent_eval:agent_eval@postgres:5432/agent_eval}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      API_KEY_SALT: ${API_KEY_SALT:-local-compose-api-key-salt}
+      WORKSPACE_SESSION_SECRET: ${WORKSPACE_SESSION_SECRET:-local-compose-session-secret}
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  prompt-agent:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    command: ["uvicorn", "examples.prompt_agent.app:app", "--host", "0.0.0.0", "--port", "8101"]
+    ports:
+      - "8101:8101"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8101/docs')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  rag-agent:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    command: ["uvicorn", "examples.rag_agent.app:app", "--host", "0.0.0.0", "--port", "8102"]
+    ports:
+      - "8102:8102"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8102/docs')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  order-agent:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    command: ["uvicorn", "examples.order_agent.app:app", "--host", "0.0.0.0", "--port", "8103"]
+    ports:
+      - "8103:8103"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8103/docs')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agent_eval
+      POSTGRES_PASSWORD: agent_eval
+      POSTGRES_DB: agent_eval
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_eval -d agent_eval"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  postgres_data:

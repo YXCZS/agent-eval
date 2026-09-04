@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check apps/api apps/worker examples tests
+      - run: mypy apps/api apps/worker examples
+      - run: pytest tests/unit tests/integration
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f infra/docker-compose.yml config --quiet
+
+  web-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+  compose-health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f infra/docker-compose.yml up -d --build --wait
+      - run: curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:8000/health
+      - run: curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:8101/docs
+      - run: curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:8102/docs
+      - run: curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:8103/docs
+      - name: Run seeded regression demo
+        run: |
+          docker compose -f infra/docker-compose.yml exec -T api \
+            python examples/seed_regression_demo.py \
+            --api-url http://127.0.0.1:8000 \
+            --workspace-session dev:project-1:development-session-secret \
+            --agent-url http://order-agent:8103/run \
+            --timeout-seconds 120 | tee demo-result.json
+          grep -q '"status": "failed"' demo-result.json
+      - if: always()
+        run: docker compose -f infra/docker-compose.yml logs
+      - if: always()
+        run: docker compose -f infra/docker-compose.yml down -v
