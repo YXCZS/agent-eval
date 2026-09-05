@@ -211,10 +211,13 @@ def create_version(
     )
     version.cases = [case_record(version.id, case) for case in cases]
     db.add(version)
+    # Dataset and DatasetVersion have a circular reference through
+    # current_version_id. Persist the version before pointing the dataset at it.
+    db.commit()
+    db.refresh(version)
     dataset.current_version_id = version.id
     dataset.updated_at = utc_now()
     db.commit()
-    db.refresh(version)
     return version
 
 

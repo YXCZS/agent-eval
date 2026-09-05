@@ -10,7 +10,7 @@ const reportSummary = { run_id: run.id, dataset_version_id: datasetVersion.id, s
 
 test("imports a dataset, starts an evaluation, and evaluates its regression gate", async ({ page }) => {
   let datasetCreated = false;
-  await page.route("http://127.0.0.1:8000/**", async (route) => {
+  await page.route("**/projects/project-1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;

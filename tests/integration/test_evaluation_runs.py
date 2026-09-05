@@ -220,7 +220,7 @@ def test_run_creation_rejects_invalid_versions_and_incompatible_requirements(
     client, settings, _ = run_client
     agent_version_id = create_tool_agent(client, settings)
     dataset_version_id = create_dataset(client, settings)
-    evaluator_id = create_evaluator(client, settings, requires=["expected_tools"])
+    evaluator_id = create_evaluator(client, settings, requires=["expected_output"])
 
     missing_data = client.post(
         "/projects/project-1/runs",
@@ -232,7 +232,7 @@ def test_run_creation_rejects_invalid_versions_and_incompatible_requirements(
         headers=headers(settings),
     )
     assert missing_data.status_code == 422
-    assert missing_data.json()["detail"]["missing"][0]["fields"] == ["expected_tools"]
+    assert missing_data.json()["detail"]["missing"][0]["fields"] == ["expected_output"]
 
     incompatible_id = create_evaluator(
         client,

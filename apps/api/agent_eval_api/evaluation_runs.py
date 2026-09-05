@@ -129,6 +129,9 @@ def case_has_requirement(case: DatasetCaseRecord, requirement: str) -> bool:
         return True
     if requirement == "input":
         return case.input_json is not None
+    if requirement == "expected_tools":
+        # An empty list is a valid expectation: the agent should call no tools.
+        return case.expected_tools is not None
     if requirement in _OPTIONAL_CASE_REQUIREMENTS:
         return bool(getattr(case, requirement))
     if requirement == "variables" or requirement == "metadata":
