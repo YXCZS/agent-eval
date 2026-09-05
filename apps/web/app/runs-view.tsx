@@ -42,13 +42,13 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const body = await response.json().catch(() => null) as T | { detail?: unknown } | null;
   if (!response.ok) {
     const detail = body && typeof body === "object" && "detail" in body ? body.detail : null;
-    throw new Error(typeof detail === "string" ? detail : `Request failed (${response.status})`);
+    throw new Error(typeof detail === "string" ? detail : `请求失败（${response.status}）`);
   }
   return body as T;
 }
 
 function displayStatus(status: RunStatus | ExecutionStatus): string {
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  return ({ queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消" })[status];
 }
 
 function statusTone(status: RunStatus | ExecutionStatus): "success" | "danger" | "warning" | "neutral" {
@@ -113,7 +113,7 @@ export function RunsView() {
       const activeRun = runs.find((item) => item.status === "queued" || item.status === "running");
       if (activeRun) setRun(await requestJson<Run>(`/projects/${PROJECT_ID}/runs/${activeRun.id}`));
     } catch (error) {
-      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "Could not load run configuration." });
+      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "无法加载运行配置。" });
     } finally { setCatalogBusy(false); }
   }
 
@@ -128,8 +128,8 @@ export function RunsView() {
     if (!run || !isActive) return;
     const timer = window.setInterval(() => {
       void requestJson<Run>(`/projects/${PROJECT_ID}/runs/${run.id}`)
-        .then((next) => { setRun(next); if (next.status !== "queued" && next.status !== "running") setNotice({ tone: next.status === "completed" ? "success" : "neutral", text: `Run ${next.id.slice(0, 8)} is ${next.status}.` }); })
-        .catch((error: unknown) => setNotice({ tone: "danger", text: error instanceof Error ? error.message : "Could not refresh run progress." }));
+        .then((next) => { setRun(next); if (next.status !== "queued" && next.status !== "running") setNotice({ tone: next.status === "completed" ? "success" : "neutral", text: `运行 ${next.id.slice(0, 8)} 当前状态为${displayStatus(next.status)}。` }); })
+        .catch((error: unknown) => setNotice({ tone: "danger", text: error instanceof Error ? error.message : "无法刷新运行进度。" }));
     }, 2000);
     return () => window.clearInterval(timer);
   }, [isActive, run]);
@@ -140,7 +140,7 @@ export function RunsView() {
 
   async function createRun() {
     if (!agentVersionId || !datasetVersionId || evaluatorIds.length === 0) {
-      setNotice({ tone: "danger", text: "Choose an agent version, dataset version, and at least one evaluator." });
+      setNotice({ tone: "danger", text: "请选择 Agent 版本、数据集版本以及至少一个评估器。" });
       return;
     }
     setSubmitBusy(true); setNotice(null);
@@ -150,8 +150,8 @@ export function RunsView() {
         body: JSON.stringify({ agent_version_id: agentVersionId, dataset_version_id: datasetVersionId, evaluator_version_ids: evaluatorIds }),
       });
       setRun(await requestJson<Run>(`/projects/${PROJECT_ID}/runs/${created.id}`));
-      setNotice({ tone: "success", text: `Run ${created.id.slice(0, 8)} queued with ${created.total_cases} cases.` });
-    } catch (error) { setNotice({ tone: "danger", text: error instanceof Error ? error.message : "Could not create evaluation run." }); }
+      setNotice({ tone: "success", text: `运行 ${created.id.slice(0, 8)} 已排队，包含 ${created.total_cases} 个用例。` });
+    } catch (error) { setNotice({ tone: "danger", text: error instanceof Error ? error.message : "无法创建评测运行。" }); }
     finally { setSubmitBusy(false); }
   }
 
@@ -160,22 +160,22 @@ export function RunsView() {
     setSubmitBusy(true); setNotice(null);
     try {
       setRun(await requestJson<Run>(`/projects/${PROJECT_ID}/runs/${run.id}/cancel`, { method: "POST" }));
-      setNotice({ tone: "neutral", text: "Cancellation requested. Queued cases will not run." });
-    } catch (error) { setNotice({ tone: "danger", text: error instanceof Error ? error.message : "Could not cancel this run." }); }
+      setNotice({ tone: "neutral", text: "已请求取消，排队中的用例将不会运行。" });
+    } catch (error) { setNotice({ tone: "danger", text: error instanceof Error ? error.message : "无法取消此运行。" }); }
     finally { setSubmitBusy(false); }
   }
 
   return <section className="runs-workbench">
-    <div className="resource-heading runs-heading"><div><p className="eyebrow"><Activity size={14} /> Experiments</p><h1>Evaluation runs</h1><p>Freeze an agent, dataset and evaluator set into one reproducible evaluation.</p></div><button className="outline-button" onClick={() => void loadCatalog()} disabled={catalogBusy}><RefreshCw className={catalogBusy ? "spin" : ""} size={16} /> Refresh catalog</button></div>
+    <div className="resource-heading runs-heading"><div><p className="eyebrow"><Activity size={14} /> 评测实验</p><h1>评测运行</h1><p>将 Agent、数据集和评估器集合固定为一次可复现的评测。</p></div><button className="outline-button" onClick={() => void loadCatalog()} disabled={catalogBusy}><RefreshCw className={catalogBusy ? "spin" : ""} size={16} /> 刷新目录</button></div>
     <div className="runs-layout">
       <section className="run-config panel">
-        <div className="run-panel-header"><div><span className="section-kicker">Configure run</span><strong>Choose versioned inputs</strong></div><span>{selectedDataset ? `${selectedDataset.cases.length} cases` : "No dataset selected"}</span></div>
+        <div className="run-panel-header"><div><span className="section-kicker">配置运行</span><strong>选择带版本的输入</strong></div><span>{selectedDataset ? `${selectedDataset.cases.length} 个用例` : "未选择数据集"}</span></div>
         <div className="run-config-body">
-          <label className="field-label">Agent version<select value={agentVersionId} onChange={(event) => setAgentVersionId(event.target.value)} disabled={catalogBusy || agents.length === 0}><option value="">Select an agent version</option>{agents.map((item) => <option value={item.id} key={item.id}>{item.agentName} / v{item.version} {item.label ? `(${item.label})` : ""}</option>)}</select></label>
-          {selectedAgent && <div className="selection-summary"><Target size={16} /><div><strong>{selectedAgent.agentName} v{selectedAgent.version}</strong><span>{selectedAgent.agent_type} agent {selectedAgent.label ? `- ${selectedAgent.label}` : ""}</span></div></div>}
-          <label className="field-label">Dataset version<select value={datasetVersionId} onChange={(event) => setDatasetVersionId(event.target.value)} disabled={catalogBusy || datasets.length === 0}><option value="">Select a dataset version</option>{datasets.map((item) => <option value={item.id} key={item.id}>{item.datasetName} / v{item.version} ({item.cases.length} cases)</option>)}</select></label>
-          <div className="evaluator-picker"><div className="picker-heading"><div><span className="section-kicker">Evaluators</span><strong>Scoring definitions</strong></div><span>{evaluatorIds.length} selected</span></div>{compatibleEvaluators.length > 0 ? compatibleEvaluators.map((item) => <label className="evaluator-option" key={item.id}><input type="checkbox" checked={evaluatorIds.includes(item.id)} onChange={() => toggleEvaluator(item.id)} /><span className="checkbox-mark"><Check size={12} /></span><span className="evaluator-copy"><strong>{item.name}</strong><small>{item.evaluator_type} / v{item.version}{item.requires.length ? ` / needs ${item.requires.join(", ")}` : ""}</small></span></label>) : <div className="picker-empty">No enabled evaluators support this Agent type.</div>}</div>
-          <div className="run-config-actions"><span>{catalogBusy ? "Loading available versions..." : "Version snapshots are frozen when the run starts."}</span><button className="primary" onClick={() => void createRun()} disabled={catalogBusy || submitBusy}><Play size={16} /> {submitBusy ? "Starting..." : "Start evaluation"}</button></div>
+          <label className="field-label">Agent 版本<select value={agentVersionId} onChange={(event) => setAgentVersionId(event.target.value)} disabled={catalogBusy || agents.length === 0}><option value="">选择 Agent 版本</option>{agents.map((item) => <option value={item.id} key={item.id}>{item.agentName} / v{item.version} {item.label ? `(${item.label})` : ""}</option>)}</select></label>
+          {selectedAgent && <div className="selection-summary"><Target size={16} /><div><strong>{selectedAgent.agentName} v{selectedAgent.version}</strong><span>{selectedAgent.agent_type} Agent {selectedAgent.label ? `- ${selectedAgent.label}` : ""}</span></div></div>}
+          <label className="field-label">数据集版本<select value={datasetVersionId} onChange={(event) => setDatasetVersionId(event.target.value)} disabled={catalogBusy || datasets.length === 0}><option value="">选择数据集版本</option>{datasets.map((item) => <option value={item.id} key={item.id}>{item.datasetName} / v{item.version}（{item.cases.length} 个用例）</option>)}</select></label>
+          <div className="evaluator-picker"><div className="picker-heading"><div><span className="section-kicker">评估器</span><strong>评分定义</strong></div><span>已选择 {evaluatorIds.length} 个</span></div>{compatibleEvaluators.length > 0 ? compatibleEvaluators.map((item) => <label className="evaluator-option" key={item.id}><input type="checkbox" checked={evaluatorIds.includes(item.id)} onChange={() => toggleEvaluator(item.id)} /><span className="checkbox-mark"><Check size={12} /></span><span className="evaluator-copy"><strong>{item.name}</strong><small>{item.evaluator_type} / v{item.version}{item.requires.length ? ` / 需要 ${item.requires.join(", ")}` : ""}</small></span></label>) : <div className="picker-empty">没有启用的评估器支持此 Agent 类型。</div>}</div>
+          <div className="run-config-actions"><span>{catalogBusy ? "正在加载可用版本……" : "运行开始时将固定版本快照。"}</span><button className="primary" onClick={() => void createRun()} disabled={catalogBusy || submitBusy}><Play size={16} /> {submitBusy ? "正在启动……" : "开始评测"}</button></div>
         </div>
       </section>
       <RunProgress run={run} progress={progress} queuedCount={queuedCount} runningCount={runningCount} busy={submitBusy} onCancel={cancelRun} />
@@ -185,8 +185,8 @@ export function RunsView() {
 }
 
 function RunProgress({ run, progress, queuedCount, runningCount, busy, onCancel }: { run: Run | null; progress: number; queuedCount: number; runningCount: number; busy: boolean; onCancel: () => Promise<void> }) {
-  if (!run) return <section className="run-progress panel"><div className="run-panel-header"><div><span className="section-kicker">Run status</span><strong>Waiting to start</strong></div></div><div className="run-empty"><Activity size={22} /><p>Start an evaluation to see sample progress, failures and runtime state here.</p></div></section>;
+  if (!run) return <section className="run-progress panel"><div className="run-panel-header"><div><span className="section-kicker">运行状态</span><strong>等待开始</strong></div></div><div className="run-empty"><Activity size={22} /><p>开始评测后，可在此查看用例进度、失败情况和运行时状态。</p></div></section>;
   const active = run.status === "queued" || run.status === "running";
   const errors = run.case_executions?.filter((item) => item.status === "failed").slice(0, 3) ?? [];
-  return <section className="run-progress panel"><div className="run-panel-header"><div><span className="section-kicker">Run status</span><strong>{run.id}</strong></div><span className={`run-status ${statusTone(run.status)}`}><StatusIcon status={run.status} /> {displayStatus(run.status)}</span></div><div className="run-progress-body"><div className="progress-number"><strong>{progress}%</strong><span>{run.completed_cases + run.failed_cases} of {run.total_cases} cases settled</span></div><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><div className="run-counts"><div><span>Completed</span><b>{run.completed_cases}</b></div><div><span>Failed</span><b className={run.failed_cases ? "danger-text" : ""}>{run.failed_cases}</b></div><div><span>Running</span><b>{runningCount}</b></div><div><span>Queued</span><b>{queuedCount}</b></div></div>{errors.length > 0 && <div className="run-errors"><strong><AlertTriangle size={14} /> Recent sample failures</strong>{errors.map((item) => <div key={item.id}><b>{item.case_id}</b><span>{item.error_type ?? "execution_error"}{item.error_message ? `: ${item.error_message}` : ""}</span></div>)}</div>}{active && <button className="outline-button cancel-run" onClick={() => void onCancel()} disabled={busy}><Square size={14} /> Cancel run</button>}</div></section>;
+  return <section className="run-progress panel"><div className="run-panel-header"><div><span className="section-kicker">运行状态</span><strong>{run.id}</strong></div><span className={`run-status ${statusTone(run.status)}`}><StatusIcon status={run.status} /> {displayStatus(run.status)}</span></div><div className="run-progress-body"><div className="progress-number"><strong>{progress}%</strong><span>{run.total_cases} 个用例中已有 {run.completed_cases + run.failed_cases} 个处理完成</span></div><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><div className="run-counts"><div><span>已完成</span><b>{run.completed_cases}</b></div><div><span>失败</span><b className={run.failed_cases ? "danger-text" : ""}>{run.failed_cases}</b></div><div><span>运行中</span><b>{runningCount}</b></div><div><span>排队中</span><b>{queuedCount}</b></div></div>{errors.length > 0 && <div className="run-errors"><strong><AlertTriangle size={14} /> 最近的用例失败</strong>{errors.map((item) => <div key={item.id}><b>{item.case_id}</b><span>{item.error_type ?? "执行错误"}{item.error_message ? `：${item.error_message}` : ""}</span></div>)}</div>}{active && <button className="outline-button cancel-run" onClick={() => void onCancel()} disabled={busy}><Square size={14} /> 取消运行</button>}</div></section>;
 }

@@ -38,24 +38,24 @@ test("imports a dataset, starts an evaluation, and evaluates its regression gate
   });
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Datasets" }).click();
-  await page.getByRole("button", { name: "Import file" }).click();
-  await page.getByLabel("Dataset name").fill("Order regression");
+  await page.getByRole("button", { name: "数据集", exact: true }).click();
+  await page.getByRole("button", { name: "导入文件" }).click();
+  await page.getByLabel("数据集名称").fill("Order regression");
   await page.locator("#dataset-file").setInputFiles({ name: "orders.csv", mimeType: "text/csv", buffer: Buffer.from("case_key,prompt\ncancel-42,Cancel order 42\n") });
-  await page.getByRole("button", { name: "Preview import" }).click();
-  await expect(page.getByText("1 valid cases", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Confirm import" }).click();
-  await expect(page.getByText("Dataset imported as version 2.")).toBeVisible();
+  await page.getByRole("button", { name: "预览导入" }).click();
+  await expect(page.getByText("1 个有效用例", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "确认导入" }).click();
+  await expect(page.getByText("数据集已导入为版本 2。", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Evaluation runs" }).click();
+  await page.getByRole("button", { name: "评测运行" }).click();
   await expect(page.getByText("Order agent v1")).toBeVisible();
   await page.getByRole("checkbox").check();
-  await page.getByRole("button", { name: "Start evaluation" }).click();
-  await expect(page.getByText("queued with 1 cases")).toBeVisible();
+  await page.getByRole("button", { name: "开始评测" }).click();
+  await expect(page.getByText("已排队，包含 1 个用例。", { exact: false })).toBeVisible();
 
-  await page.getByRole("button", { name: "Reports" }).click();
-  await page.getByRole("tab", { name: "Compare & gate" }).click();
-  await page.getByLabel("Metric").selectOption("task_success");
-  await page.getByRole("button", { name: "Evaluate gate" }).click();
+  await page.getByRole("button", { name: "评测报告" }).click();
+  await page.getByRole("tab", { name: "比较与门禁" }).click();
+  await page.getByLabel("指标").selectOption("task_success");
+  await page.getByRole("button", { name: "评估门禁" }).click();
   await expect(page.getByText("100%")).toBeVisible();
 });
