@@ -19,6 +19,7 @@ Important settings include:
 ## Start and stop
 
 ```powershell
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 docker compose -f infra/docker-compose.yml up -d --build --wait
 docker compose -f infra/docker-compose.yml ps
 docker compose -f infra/docker-compose.yml logs -f api worker

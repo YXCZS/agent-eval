@@ -131,10 +131,12 @@ erDiagram
 ### 启动完整演示环境
 
 ```powershell
-Copy-Item .env.example .env
-# 本地运行时，请将 .env 中的尖括号占位符替换为随机字符串和本地数据库连接信息。
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 docker compose -f infra/docker-compose.yml up -d --build --wait
 ```
+
+Compose 会自动读取根目录的 `.env`。`.env` 只用于本地运行，已被 Git 忽略；
+GitHub 中保留的是 `.env.example`。
 
 访问：
 
@@ -150,14 +152,11 @@ Compose 使用 PostgreSQL volume 保存演示数据。
 
 ### 运行版本回归 Demo
 
-从仓库根目录执行。session 从环境变量读取，不要把它写进命令历史或提交到仓库：
+推荐在 API 容器内执行 Demo。这样容器可以直接读取 `.env` 中的 session secret，
+同时可以通过 Compose 服务名访问示例 Agent：
 
 ```powershell
-$env:DEMO_SESSION = "dev:project-1:$env:WORKSPACE_SESSION_SECRET"
-python examples/seed_regression_demo.py `
-  --api-url http://127.0.0.1:8000 `
-  --workspace-session $env:DEMO_SESSION `
-  --agent-url http://order-agent:8103/run
+docker compose -f infra/docker-compose.yml exec -T api sh -c 'python examples/seed_regression_demo.py --api-url http://127.0.0.1:8000 --workspace-session "dev:project-1:$WORKSPACE_SESSION_SECRET" --agent-url http://order-agent:8103/run'
 ```
 
 Demo 会创建 Dataset v1/v2、基线与候选 Tool Agent、确定性 Evaluator、两次运行、
