@@ -12,6 +12,7 @@ node_modules/
 .next/
 playwright-report/
 test-results/
+apps/web/artifacts/
 dist/
 *.sqlite3
 *.db

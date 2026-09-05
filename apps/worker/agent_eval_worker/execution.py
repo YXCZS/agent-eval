@@ -309,6 +309,73 @@ def _finish_run(db: Session, run: EvaluationRunRecord) -> None:
         transition_run(run, RunStatus.PARTIAL)
 
 
+def _recover_persistence_failure(
+    db: Session,
+    settings: Settings,
+    run_id: str,
+    case_id: str,
+    trace_id: str,
+    started_at: datetime,
+    error: Exception,
+) -> dict[str, str]:
+    """Convert post-invocation failures into a terminal case state."""
+
+    db.rollback()
+    run = db.scalar(
+        select(EvaluationRunRecord).where(EvaluationRunRecord.id == run_id).with_for_update()
+    )
+    execution = db.scalar(
+        select(CaseExecutionRecord)
+        .where(CaseExecutionRecord.run_id == run_id, CaseExecutionRecord.case_id == case_id)
+        .with_for_update()
+    )
+    if run is None or execution is None:
+        return {"status": "not_found"}
+    if execution.status in _FINISHED_EXECUTION_STATUSES:
+        return {"status": "already_finished"}
+    if run.status == RunStatus.CANCELLED.value:
+        transition_execution(execution, ExecutionStatus.CANCELLED)
+        db.commit()
+        return {"status": "cancelled"}
+
+    ended_at = datetime.now(UTC)
+    failed_trace = _trace(
+        trace_id=trace_id,
+        run=run,
+        execution=execution,
+        status=ExecutionStatus.FAILED,
+        spans=[
+            _agent_span(
+                trace_id=trace_id,
+                span_id=new_id(),
+                execution=execution,
+                status=ExecutionStatus.FAILED,
+                started_at=started_at,
+                ended_at=ended_at,
+                error={"type": "persistence_error", "message": str(error)},
+            )
+        ],
+        extensions={},
+    )
+    persist_trace(db, run.project_id, failed_trace, settings, commit=False)
+    execution.error_type = "persistence_error"
+    execution.error_message = str(error)
+    execution.trace_id = trace_id
+    transition_execution(execution, ExecutionStatus.FAILED)
+    statuses = db.scalars(
+        select(CaseExecutionRecord.status).where(CaseExecutionRecord.run_id == run.id)
+    ).all()
+    run.completed_cases = sum(item == ExecutionStatus.COMPLETED.value for item in statuses)
+    run.failed_cases = sum(item == ExecutionStatus.FAILED.value for item in statuses)
+    if run.completed_cases + run.failed_cases == run.total_cases:
+        transition_run(
+            run,
+            RunStatus.PARTIAL if run.completed_cases else RunStatus.FAILED,
+        )
+    db.commit()
+    return {"status": "failed", "trace_id": trace_id}
+
+
 def execute_case(db: Session, settings: Settings, run_id: str, case_id: str) -> dict[str, str]:
     """Execute one CaseExecution once and persist either output or isolated failure."""
 
@@ -412,16 +479,21 @@ def execute_case(db: Session, settings: Settings, run_id: str, case_id: str) -> 
 
     execution.attempt = max(execution.attempt, attempts)
     if trace is not None:
-        persist_trace(db, run.project_id, trace, settings, commit=False)
-        execution.output = output
-        execution.tool_calls = tool_calls
-        execution.usage = usage
-        execution.trace_id = trace_id
-        transition_execution(execution, ExecutionStatus.COMPLETED)
-        asyncio.run(evaluate_and_persist_scores(db, run, execution, trace, settings))
-        _finish_run(db, run)
-        db.commit()
-        return {"status": "completed", "trace_id": trace_id}
+        try:
+            persist_trace(db, run.project_id, trace, settings, commit=False)
+            execution.output = output
+            execution.tool_calls = tool_calls
+            execution.usage = usage
+            execution.trace_id = trace_id
+            transition_execution(execution, ExecutionStatus.COMPLETED)
+            asyncio.run(evaluate_and_persist_scores(db, run, execution, trace, settings))
+            _finish_run(db, run)
+            db.commit()
+            return {"status": "completed", "trace_id": trace_id}
+        except Exception as exc:
+            return _recover_persistence_failure(
+                db, settings, run_id, case_id, trace_id, started_at, exc
+            )
 
     assert error_type is not None and message is not None
     ended_at = datetime.now(UTC)
@@ -443,13 +515,18 @@ def execute_case(db: Session, settings: Settings, run_id: str, case_id: str) -> 
         ],
         extensions={},
     )
-    if db.get(TraceRecord, trace_id) is None:
-        persist_trace(db, run.project_id, failed_trace, settings, commit=False)
-    execution.error_type = error_type
-    execution.error_message = message
-    execution.trace_id = trace_id
-    transition_execution(execution, ExecutionStatus.FAILED)
-    asyncio.run(evaluate_and_persist_scores(db, run, execution, failed_trace, settings))
-    _finish_run(db, run)
-    db.commit()
-    return {"status": "failed", "trace_id": trace_id}
+    try:
+        if db.get(TraceRecord, trace_id) is None:
+            persist_trace(db, run.project_id, failed_trace, settings, commit=False)
+        execution.error_type = error_type
+        execution.error_message = message
+        execution.trace_id = trace_id
+        transition_execution(execution, ExecutionStatus.FAILED)
+        asyncio.run(evaluate_and_persist_scores(db, run, execution, failed_trace, settings))
+        _finish_run(db, run)
+        db.commit()
+        return {"status": "failed", "trace_id": trace_id}
+    except Exception as exc:
+        return _recover_persistence_failure(
+            db, settings, run_id, case_id, trace_id, started_at, exc
+        )

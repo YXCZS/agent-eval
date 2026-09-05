@@ -22,7 +22,11 @@ RUN_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
 }
 
 EXECUTION_TRANSITIONS: dict[ExecutionStatus, set[ExecutionStatus]] = {
-    ExecutionStatus.QUEUED: {ExecutionStatus.RUNNING, ExecutionStatus.CANCELLED},
+    ExecutionStatus.QUEUED: {
+        ExecutionStatus.RUNNING,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+    },
     ExecutionStatus.RUNNING: {
         ExecutionStatus.COMPLETED,
         ExecutionStatus.FAILED,

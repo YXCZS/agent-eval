@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -50,10 +51,13 @@ def issue_dev_session(project_id: str, settings: Settings) -> str:
     return f"dev:{project_id}:{secret}"
 
 
-def get_db() -> Session:
-    """FastAPI dependency; applications can override it for tests or another unit of work."""
-
-    return get_session_factory()()
+def get_db() -> Iterator[Session]:
+    """Yield one request-scoped database session and always return it to the pool."""
+    session = get_session_factory()()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def require_project_access(

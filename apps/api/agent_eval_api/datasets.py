@@ -262,6 +262,26 @@ def list_datasets(
     return [dataset_response(dataset) for dataset in datasets]
 
 
+@router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_dataset(
+    project_id: str,
+    dataset_id: str,
+    db: Session = Depends(get_db),  # noqa: B008
+    _: AuthContext = Depends(require_project_access),  # noqa: B008
+) -> None:
+    """Delete an empty dataset created while an import is being previewed."""
+    dataset = get_dataset(db, project_id, dataset_id)
+    if any(version.cases or version.runs for version in dataset.versions):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="dataset with cases or runs cannot be deleted",
+        )
+    dataset.current_version_id = None
+    db.flush()
+    db.delete(dataset)
+    db.commit()
+
+
 @router.get("/{dataset_id}", response_model=Dataset)
 def read_dataset(
     project_id: str,

@@ -55,7 +55,7 @@ test("imports a dataset, starts an evaluation, and evaluates its regression gate
 
   await page.getByRole("button", { name: "评测报告" }).click();
   await page.getByRole("tab", { name: "比较与门禁" }).click();
-  await page.getByLabel("指标").selectOption("task_success");
+  await page.getByLabel("指标").selectOption(`task_success::${evaluator.id}`);
   await page.getByRole("button", { name: "评估门禁" }).click();
   await expect(page.getByText("100%")).toBeVisible();
 });

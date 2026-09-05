@@ -320,7 +320,33 @@ def create_run(
         transition_run(run, RunStatus.COMPLETED)
     db.commit()
     db.refresh(run)
-    enqueue_case_jobs(run.id, [case.id for case in cases])
+    try:
+        enqueue_case_jobs(run.id, [case.id for case in cases])
+    except Exception as exc:
+        # The run is already visible to users, so do not leave it queued when
+        # the broker rejects the initial delivery.
+        db.rollback()
+        failed_run = db.get(EvaluationRunRecord, run.id)
+        from agent_eval_api.run_state import transition_run
+
+        failed_executions = db.scalars(
+            select(CaseExecutionRecord).where(CaseExecutionRecord.run_id == run.id)
+        ).all()
+        if failed_run is not None and failed_run.status == RunStatus.QUEUED.value:
+            for failed_execution in failed_executions:
+                if failed_execution.status == ExecutionStatus.QUEUED.value:
+                    failed_execution.error_type = "queue_error"
+                    failed_execution.error_message = str(exc)
+                    from agent_eval_api.run_state import transition_execution
+
+                    transition_execution(failed_execution, ExecutionStatus.FAILED)
+            failed_run.failed_cases = len(failed_executions)
+            transition_run(failed_run, RunStatus.FAILED)
+            db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="evaluation queue unavailable; run marked as failed",
+        ) from exc
     return run_response(run)
 
 

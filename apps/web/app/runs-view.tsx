@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 
 type AgentType = "prompt" | "rag" | "tool" | "custom";
-type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type RunStatus = "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
 type ExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 type Agent = { id: string; name: string; agent_type: AgentType; active: boolean };
@@ -42,19 +42,22 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const body = await response.json().catch(() => null) as T | { detail?: unknown } | null;
   if (!response.ok) {
     const detail = body && typeof body === "object" && "detail" in body ? body.detail : null;
-    throw new Error(typeof detail === "string" ? detail : `请求失败（${response.status}）`);
+    if (Array.isArray(detail)) {
+      throw new Error(detail.map((item) => typeof item === "object" && item && "msg" in item ? String(item.msg) : String(item)).join("；"));
+    }
+    throw new Error(typeof detail === "string" ? detail : typeof detail === "object" && detail !== null ? JSON.stringify(detail) : `请求失败（${response.status}）`);
   }
   return body as T;
 }
 
 function displayStatus(status: RunStatus | ExecutionStatus): string {
-  return ({ queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消" })[status];
+  return ({ queued: "排队中", running: "运行中", completed: "已完成", partial: "部分完成", failed: "失败", cancelled: "已取消" })[status];
 }
 
 function statusTone(status: RunStatus | ExecutionStatus): "success" | "danger" | "warning" | "neutral" {
   if (status === "completed") return "success";
   if (status === "failed") return "danger";
-  if (status === "cancelled") return "warning";
+  if (status === "cancelled" || status === "partial") return "warning";
   return "neutral";
 }
 
@@ -75,7 +78,9 @@ export function RunsView() {
   const [run, setRun] = useState<Run | null>(null);
   const [catalogBusy, setCatalogBusy] = useState(true);
   const [submitBusy, setSubmitBusy] = useState(false);
+  const [catalogIssues, setCatalogIssues] = useState<string[]>([]);
   const [notice, setNotice] = useState<{ tone: "success" | "danger" | "neutral"; text: string } | null>(null);
+  const pollControllerRef = useRef<AbortController | null>(null);
 
   const selectedAgent = agents.find((item) => item.id === agentVersionId) ?? null;
   const compatibleEvaluators = useMemo(
@@ -91,27 +96,49 @@ export function RunsView() {
   async function loadCatalog() {
     setCatalogBusy(true);
     try {
-      const [rawAgents, rawDatasets, rawEvaluators, runs] = await Promise.all([
+      const [agentsResult, datasetsResult, evaluatorsResult, runsResult] = await Promise.allSettled([
         requestJson<Agent[]>(`/projects/${PROJECT_ID}/agents`),
         requestJson<Dataset[]>(`/projects/${PROJECT_ID}/datasets`),
         requestJson<Evaluator[]>(`/projects/${PROJECT_ID}/evaluators`),
         requestJson<Run[]>(`/projects/${PROJECT_ID}/runs`),
       ]);
+      const rawAgents = agentsResult.status === "fulfilled" ? agentsResult.value : [];
+      const rawDatasets = datasetsResult.status === "fulfilled" ? datasetsResult.value : [];
+      const rawEvaluators = evaluatorsResult.status === "fulfilled" ? evaluatorsResult.value : [];
+      const runs = runsResult.status === "fulfilled" ? runsResult.value : [];
+      const versionIssues: string[] = [];
       const agentVersions = await Promise.all(rawAgents.map(async (agent) => {
-        const versions = await requestJson<AgentVersion[]>(`/projects/${PROJECT_ID}/agents/${agent.id}/versions`);
-        return versions.map((version) => ({ ...version, agentName: agent.name, active: agent.active }));
+        try {
+          const versions = await requestJson<AgentVersion[]>(`/projects/${PROJECT_ID}/agents/${agent.id}/versions`);
+          return versions.map((version) => ({ ...version, agentName: agent.name, active: agent.active }));
+        } catch (error) {
+          versionIssues.push(`Agent「${agent.name}」版本：${error instanceof Error ? error.message : "加载失败"}`);
+          return [];
+        }
       }));
       const datasetVersions = await Promise.all(rawDatasets.map(async (dataset) => {
-        const versions = await requestJson<DatasetVersion[]>(`/projects/${PROJECT_ID}/datasets/${dataset.id}/versions`);
-        return versions.map((version) => ({ ...version, datasetName: dataset.name }));
+        try {
+          const versions = await requestJson<DatasetVersion[]>(`/projects/${PROJECT_ID}/datasets/${dataset.id}/versions`);
+          return versions.map((version) => ({ ...version, datasetName: dataset.name }));
+        } catch (error) {
+          versionIssues.push(`数据集「${dataset.name}」版本：${error instanceof Error ? error.message : "加载失败"}`);
+          return [];
+        }
       }));
       const nextAgents = agentVersions.flat().filter((item) => item.active && item.enabled);
       const nextDatasets = datasetVersions.flat();
       setAgents(nextAgents); setDatasets(nextDatasets); setEvaluators(rawEvaluators);
-      setAgentVersionId((current) => current || nextAgents[0]?.id || "");
-      setDatasetVersionId((current) => current || nextDatasets[0]?.id || "");
-      const activeRun = runs.find((item) => item.status === "queued" || item.status === "running");
+      setCatalogIssues(versionIssues);
+      setAgentVersionId((current) => nextAgents.some((item) => item.id === current) ? current : nextAgents[0]?.id || "");
+      setDatasetVersionId((current) => nextDatasets.some((item) => item.id === current) ? current : nextDatasets[0]?.id || "");
+      const activeRun = runs.find((item) => item.status === "queued" || item.status === "running") ?? runs[0];
       if (activeRun) setRun(await requestJson<Run>(`/projects/${PROJECT_ID}/runs/${activeRun.id}`));
+      else setRun(null);
+      const failures = [agentsResult, datasetsResult, evaluatorsResult, runsResult].filter((result) => result.status === "rejected").length;
+      if (failures || versionIssues.length) {
+        const details = [...versionIssues, failures ? `${failures} 个目录接口失败` : ""].filter(Boolean).join("；");
+        setNotice({ tone: "danger", text: `部分运行配置加载失败：${details}。请检查 API 后点击刷新目录。` });
+      }
     } catch (error) {
       setNotice({ tone: "danger", text: error instanceof Error ? error.message : "无法加载运行配置。" });
     } finally { setCatalogBusy(false); }
@@ -125,14 +152,32 @@ export function RunsView() {
   }, [selectedAgent, compatibleEvaluators]);
 
   useEffect(() => {
-    if (!run || !isActive) return;
-    const timer = window.setInterval(() => {
-      void requestJson<Run>(`/projects/${PROJECT_ID}/runs/${run.id}`)
-        .then((next) => { setRun(next); if (next.status !== "queued" && next.status !== "running") setNotice({ tone: next.status === "completed" ? "success" : "neutral", text: `运行 ${next.id.slice(0, 8)} 当前状态为${displayStatus(next.status)}。` }); })
-        .catch((error: unknown) => setNotice({ tone: "danger", text: error instanceof Error ? error.message : "无法刷新运行进度。" }));
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [isActive, run]);
+    const runId = run?.id;
+    if (!runId || !isActive) return;
+    const controller = new AbortController();
+    pollControllerRef.current = controller;
+    let timer: number | undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const next = await requestJson<Run>(`/projects/${PROJECT_ID}/runs/${runId}`, { signal: controller.signal });
+        if (stopped) return;
+        setRun(next);
+        if (next.status !== "queued" && next.status !== "running") {
+          setNotice({ tone: next.status === "completed" ? "success" : "neutral", text: `运行 ${next.id.slice(0, 8)} 当前状态为${displayStatus(next.status)}。` });
+        } else {
+          timer = window.setTimeout(() => void poll(), 2000);
+        }
+      } catch (error: unknown) {
+        if (!controller.signal.aborted) {
+          setNotice({ tone: "danger", text: error instanceof Error ? `运行进度刷新失败：${error.message}` : "运行进度刷新失败，请稍后重试。" });
+          timer = window.setTimeout(() => void poll(), 4000);
+        }
+      }
+    };
+    timer = window.setTimeout(() => void poll(), 2000);
+    return () => { stopped = true; if (timer !== undefined) window.clearTimeout(timer); controller.abort(); if (pollControllerRef.current === controller) pollControllerRef.current = null; };
+  }, [isActive, run?.id]);
 
   function toggleEvaluator(id: string) {
     setEvaluatorIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
@@ -157,6 +202,8 @@ export function RunsView() {
 
   async function cancelRun() {
     if (!run) return;
+    pollControllerRef.current?.abort();
+    pollControllerRef.current = null;
     setSubmitBusy(true); setNotice(null);
     try {
       setRun(await requestJson<Run>(`/projects/${PROJECT_ID}/runs/${run.id}/cancel`, { method: "POST" }));
@@ -180,6 +227,7 @@ export function RunsView() {
       </section>
       <RunProgress run={run} progress={progress} queuedCount={queuedCount} runningCount={runningCount} busy={submitBusy} onCancel={cancelRun} />
     </div>
+    {catalogIssues.length > 0 && !notice && <div className="run-notice danger"><span><AlertTriangle size={16} /></span>{catalogIssues.join("；")}</div>}
     {notice && <div className={`run-notice ${notice.tone}`}><span>{notice.tone === "success" ? <Check size={16} /> : notice.tone === "danger" ? <AlertTriangle size={16} /> : <Clock3 size={16} />}</span>{notice.text}</div>}
   </section>;
 }

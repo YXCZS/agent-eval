@@ -31,15 +31,15 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 const PROJECT_ID = process.env.NEXT_PUBLIC_PROJECT_ID ?? "project-1";
 const SESSION = process.env.NEXT_PUBLIC_WORKSPACE_SESSION ?? "";
 
-const emptyCase = (): ManualCase => ({ id: `case-${Date.now()}`, input: "", expected_output: "", metadata: "{}" });
+const emptyCase = (): ManualCase => ({ id: `case-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, input: "", expected_output: "", metadata: "{}" });
 
 function authHeaders(json = true): HeadersInit {
   return { ...(json ? { "Content-Type": "application/json" } : {}), "X-Workspace-Session": SESSION };
 }
 
-function parseJsonField(value: string, fallback: JsonValue = undefined): JsonValue {
+function parseJsonField(value: string, fallback: JsonValue = undefined, strict = false): JsonValue {
   if (!value.trim()) return fallback;
-  try { return JSON.parse(value); } catch { return value; }
+  try { return JSON.parse(value); } catch { if (strict) throw new Error("预期输出和元数据必须是合法 JSON。"); return value; }
 }
 
 function textValue(value: JsonValue): string {
@@ -72,8 +72,8 @@ function caseFromManual(row: ManualCase, index: number): Record<string, JsonValu
   return {
     id: row.id.trim() || `case-${index + 1}`,
     input: parseJsonField(row.input, ""),
-    expected_output: parseJsonField(row.expected_output),
-    metadata: parseJsonField(row.metadata, {}),
+    expected_output: parseJsonField(row.expected_output, undefined, true),
+    metadata: parseJsonField(row.metadata, {}, true),
   };
 }
 
@@ -94,9 +94,30 @@ export function DatasetsView() {
 
   const mappedFields = useMemo(() => Object.fromEntries(Object.entries(mapping).filter(([, value]) => value)), [mapping]);
 
-  function resetImport() {
+  async function resetImport() {
+    const pendingDatasetId = datasetId;
     setFile(null); setFileText(""); setFields([]); setPreview(null); setDatasetId(null);
     setMapping({ id: "", input: "", expected_output: "", variables: "", criteria: "", metadata: "" });
+    if (pendingDatasetId) {
+      try {
+        await fetch(`${API_URL}/projects/${PROJECT_ID}/datasets/${pendingDatasetId}`, { method: "DELETE", headers: authHeaders(false) });
+      } catch {
+        setNotice({ tone: "danger", text: "清理未完成的导入数据集失败，请检查 API。" });
+      }
+    }
+  }
+
+  function changeImportFormat(nextFormat: ImportFormat) {
+    setFormat(nextFormat);
+    setPreview(null);
+    const nextFields = fileText ? sourceFields(fileText, nextFormat) : [];
+    setFields(nextFields);
+    setMapping({
+      id: nextFields.find((field) => ["id", "case_id", "case_key"].includes(field)) ?? "",
+      input: nextFields.find((field) => ["input", "question", "prompt"].includes(field)) ?? "",
+      expected_output: nextFields.find((field) => ["expected_output", "expected", "answer"].includes(field)) ?? "",
+      variables: "", criteria: "", metadata: "",
+    });
   }
 
   function updateCase(index: number, field: keyof ManualCase, value: string) {
@@ -106,29 +127,49 @@ export function DatasetsView() {
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0];
     if (!selected) return;
+    if (selected.size > 5 * 1024 * 1024) {
+      event.target.value = "";
+      setFile(null); setFileText(""); setFields([]); setPreview(null);
+      setNotice({ tone: "danger", text: "文件不能超过 5 MB。" });
+      return;
+    }
     const nextFormat = guessFormat(selected.name);
     setFile(selected); setFormat(nextFormat); setPreview(null); setNotice(null);
-    const text = await selected.text();
-    setFileText(text);
-    const nextFields = sourceFields(text, nextFormat);
-    setFields(nextFields);
-    setMapping((current) => ({ ...current, id: nextFields.find((field) => ["id", "case_id", "case_key"].includes(field)) ?? "", input: nextFields.find((field) => ["input", "question", "prompt"].includes(field)) ?? "", expected_output: nextFields.find((field) => ["expected_output", "expected", "answer"].includes(field)) ?? "" }));
+    try {
+      const text = await selected.text();
+      setFileText(text);
+      const nextFields = sourceFields(text, nextFormat);
+      setFields(nextFields);
+      setMapping((current) => ({ ...current, id: nextFields.find((field) => ["id", "case_id", "case_key"].includes(field)) ?? "", input: nextFields.find((field) => ["input", "question", "prompt"].includes(field)) ?? "", expected_output: nextFields.find((field) => ["expected_output", "expected", "answer"].includes(field)) ?? "" }));
+    } catch (error) {
+      setFile(null); setFileText(""); setFields([]); setPreview(null);
+      setNotice({ tone: "danger", text: error instanceof Error ? `读取文件失败：${error.message}` : "读取文件失败。" });
+    }
   }
 
   async function previewImport() {
-    if (!fileText) { setNotice({ tone: "danger", text: "请先选择 CSV、JSON 或 JSONL 文件。" }); return; }
+    if (!fileText || !file) { setNotice({ tone: "danger", text: "请先选择 CSV、JSON 或 JSONL 文件。" }); return; }
     if (!name.trim()) { setNotice({ tone: "danger", text: "预览导入前必须填写数据集名称。" }); return; }
+    if (!mapping.id || !mapping.input) { setNotice({ tone: "danger", text: "请先映射必填字段：用例 ID 和输入。" }); return; }
     setBusy(true); setNotice(null);
+    let createdDatasetId: string | null = null;
     try {
       const response = await fetch(`${API_URL}/projects/${PROJECT_ID}/datasets`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ name: name.trim(), description, cases: [] }) });
-      const created = await response.json() as { id?: string; detail?: string };
-      if (!response.ok || !created.id) throw new Error(created.detail ?? `无法创建数据集（${response.status}）`);
+      const created = await response.json() as { id?: string; detail?: unknown };
+      if (!response.ok || !created.id) throw new Error(typeof created.detail === "string" ? created.detail : `无法创建数据集（${response.status}）`);
+      createdDatasetId = created.id;
       setDatasetId(created.id);
       const previewResponse = await fetch(`${API_URL}/projects/${PROJECT_ID}/datasets/${created.id}/imports/preview`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ format, content_base64: encodeBase64(fileText), field_mapping: mappedFields }) });
       const result = await previewResponse.json() as Preview & { detail?: string };
-      if (!previewResponse.ok) throw new Error(typeof result.detail === "string" ? result.detail : `预览失败（${previewResponse.status}）`);
+      if (!previewResponse.ok) throw new Error(typeof result.detail === "string" ? result.detail : typeof result.detail === "object" ? JSON.stringify(result.detail) : `预览失败（${previewResponse.status}）`);
       setPreview(result); setNotice({ tone: result.issues.length ? "neutral" : "success", text: `已有 ${result.cases.length} 个有效用例可供检查。` });
-    } catch (error) { setNotice({ tone: "danger", text: error instanceof Error ? error.message : "导入预览失败。" }); }
+    } catch (error) {
+      if (createdDatasetId) {
+        try { await fetch(`${API_URL}/projects/${PROJECT_ID}/datasets/${createdDatasetId}`, { method: "DELETE", headers: authHeaders(false) }); } catch { /* Keep the original preview error visible. */ }
+      }
+      setDatasetId(null);
+      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "导入预览失败。" });
+    }
     finally { setBusy(false); }
   }
 
@@ -138,17 +179,17 @@ export function DatasetsView() {
     try {
       const response = await fetch(`${API_URL}/projects/${PROJECT_ID}/datasets/${datasetId}/imports/commit`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ format, content_base64: encodeBase64(fileText), field_mapping: mappedFields, allow_partial: preview.issues.length > 0 }) });
       const result = await response.json() as { dataset_version?: { version: number }; issues?: ImportIssue[]; detail?: unknown };
-      if (!response.ok || !result.dataset_version) throw new Error(typeof result.detail === "string" ? result.detail : "无法提交导入。");
+      if (!response.ok || !result.dataset_version) throw new Error(typeof result.detail === "string" ? result.detail : typeof result.detail === "object" ? JSON.stringify(result.detail) : "无法提交导入。");
       setNotice({ tone: "success", text: `数据集已导入为版本 ${result.dataset_version.version}。` });
-      setPreview(null); setFile(null); setFileText("");
+      setPreview(null); setFile(null); setFileText(""); setDatasetId(null);
     } catch (error) { setNotice({ tone: "danger", text: error instanceof Error ? error.message : "导入提交失败。" }); }
     finally { setBusy(false); }
   }
 
   async function createManual() {
     if (!name.trim()) { setNotice({ tone: "danger", text: "必须填写数据集名称。" }); return; }
-    const invalid = cases.some((row) => !row.input.trim());
-    if (invalid) { setNotice({ tone: "danger", text: "每个用例都必须填写输入。" }); return; }
+    const invalid = cases.some((row) => !row.id.trim() || !row.input.trim());
+    if (invalid) { setNotice({ tone: "danger", text: "每个用例都必须填写 ID 和输入。" }); return; }
     setBusy(true); setNotice(null);
     try {
       const response = await fetch(`${API_URL}/projects/${PROJECT_ID}/datasets`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ name: name.trim(), description, cases: cases.map(caseFromManual) }) });
@@ -161,13 +202,13 @@ export function DatasetsView() {
   }
 
   return <section className="datasets-workbench">
-    <div className="resource-heading dataset-heading"><div><p className="eyebrow"><Database size={14} /> 评测输入</p><h1>数据集</h1><p>一次构建带版本的数据集，即可在 Agent、评估器和回归运行中重复使用。</p></div><button className="primary" onClick={() => { setMode("manual"); setName(""); setDescription(""); setNotice(null); }}><Plus size={17} /> 新建数据集</button></div>
+    <div className="resource-heading dataset-heading"><div><p className="eyebrow"><Database size={14} /> 评测输入</p><h1>数据集</h1><p>一次构建带版本的数据集，即可在 Agent、评估器和回归运行中重复使用。</p></div><button className="primary" onClick={() => { setMode("manual"); setName(""); setDescription(""); setCases([emptyCase()]); void resetImport(); setNotice(null); }}><Plus size={17} /> 新建数据集</button></div>
     <section className="dataset-builder panel">
       <div className="builder-top"><div><span className="section-kicker">新建数据集</span><strong>{mode === "manual" ? "添加评估用例" : "导入评估用例"}</strong></div><span className="version-badge">创建版本 1</span></div>
       <div className="builder-body">
         <div className="field-grid two dataset-meta"><label className="field-label">数据集名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：support-smoke" /></label><label className="field-label">描述<input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="说明此数据集检查的内容" /></label></div>
         <div className="mode-tabs" role="tablist"><button className={mode === "manual" ? "active" : ""} onClick={() => { setMode("manual"); setNotice(null); }}><Table2 size={16} /> 手动填写</button><button className={mode === "import" ? "active" : ""} onClick={() => { setMode("import"); setNotice(null); }}><FileUp size={16} /> 导入文件</button></div>
-        {mode === "manual" ? <ManualEditor cases={cases} updateCase={updateCase} addCase={() => setCases((current) => [...current, emptyCase()])} removeCase={(index) => setCases((current) => current.length === 1 ? current : current.filter((_, rowIndex) => rowIndex !== index))} /> : <ImportEditor file={file} format={format} fields={fields} mapping={mapping} setFormat={setFormat} setMapping={setMapping} onFile={handleFile} preview={preview} onPreview={previewImport} onCommit={commitImport} onReset={resetImport} busy={busy} />}
+        {mode === "manual" ? <ManualEditor cases={cases} updateCase={updateCase} addCase={() => setCases((current) => [...current, emptyCase()])} removeCase={(index) => setCases((current) => current.length === 1 ? current : current.filter((_, rowIndex) => rowIndex !== index))} /> : <ImportEditor file={file} format={format} fields={fields} mapping={mapping} setFormat={changeImportFormat} setMapping={setMapping} onFile={handleFile} preview={preview} onPreview={previewImport} onCommit={commitImport} onReset={() => void resetImport()} busy={busy} />}
         {notice && <div className={`dataset-notice ${notice.tone}`}><span>{notice.tone === "success" ? <Check size={16} /> : notice.tone === "danger" ? <AlertTriangle size={16} /> : <RefreshCw size={16} />}</span>{notice.text}</div>}
         {mode === "manual" && <div className="builder-actions"><span className="muted-helper">用例将作为新的不可变数据集版本保存。</span><button className="primary" onClick={createManual} disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Database size={16} />} 创建数据集</button></div>}
       </div>

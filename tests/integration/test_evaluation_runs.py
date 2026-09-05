@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from agent_eval_api import auth
 from agent_eval_api.auth import get_db, issue_dev_session
-from agent_eval_api.contracts import ExpectedToolCall, RunStatus, ScoreStatus
+from agent_eval_api.contracts import ExecutionStatus, ExpectedToolCall, RunStatus, ScoreStatus
 from agent_eval_api.db import (
     AggregateMetricRecord,
     Base,
@@ -269,6 +269,42 @@ def test_run_creation_rejects_invalid_versions_and_incompatible_requirements(
     assert isolated.status_code == 404
 
 
+def test_run_creation_marks_run_failed_when_queue_delivery_fails(
+    run_client: tuple[TestClient, Settings, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, settings, session = run_client
+    agent_version_id = create_tool_agent(client, settings)
+    dataset_version_id = create_dataset(client, settings)
+    evaluator_id = create_evaluator(client, settings)
+
+    def fail_enqueue(_run_id: str, _case_ids: object) -> None:
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr("agent_eval_api.evaluation_runs.enqueue_case_jobs", fail_enqueue)
+    response = client.post(
+        "/projects/project-1/runs",
+        json={
+            "agent_version_id": agent_version_id,
+            "dataset_version_id": dataset_version_id,
+            "evaluator_version_ids": [evaluator_id],
+        },
+        headers=headers(settings),
+    )
+
+    assert response.status_code == 503
+    run = session.scalar(select(EvaluationRunRecord).order_by(EvaluationRunRecord.created_at.desc()))
+    assert run is not None
+    assert run.status == RunStatus.FAILED.value
+    assert run.failed_cases == run.total_cases
+    executions = session.scalars(
+        select(CaseExecutionRecord).where(CaseExecutionRecord.run_id == run.id)
+    ).all()
+    assert executions
+    assert {item.status for item in executions} == {ExecutionStatus.FAILED.value}
+    assert {item.error_type for item in executions} == {"queue_error"}
+
+
 def test_case_execution_persists_trace_isolates_failures_and_is_idempotent(
     run_client: tuple[TestClient, Settings, Session],
     monkeypatch: pytest.MonkeyPatch,
@@ -441,6 +477,59 @@ def test_case_execution_persists_prompt_and_llm_trace_spans(
     assert set(spans_by_kind) == {"agent", "prompt", "llm", "evaluator"}
     assert spans_by_kind["prompt"].parent_span_id == spans_by_kind["agent"].span_id
     assert spans_by_kind["llm"].parent_span_id == spans_by_kind["prompt"].span_id
+
+
+def test_worker_converts_score_persistence_failure_to_failed_execution(
+    run_client: tuple[TestClient, Settings, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, settings, session = run_client
+    agent_version_id = create_tool_agent(client, settings)
+    dataset_version_id = create_dataset(client, settings)
+    evaluator_id = create_evaluator(client, settings)
+    created = client.post(
+        "/projects/project-1/runs",
+        json={
+            "agent_version_id": agent_version_id,
+            "dataset_version_id": dataset_version_id,
+            "evaluator_version_ids": [evaluator_id],
+        },
+        headers=headers(settings),
+    )
+    run_id = created.json()["id"]
+    execution = session.scalar(
+        select(CaseExecutionRecord).where(CaseExecutionRecord.run_id == run_id)
+    )
+    assert execution is not None
+
+    async def fake_http_agent(*_args: object, **_kwargs: object) -> HttpAgentRunResult:
+        return HttpAgentRunResult(
+            output={"status": "ok"},
+            tool_calls=[],
+            usage={},
+            trace=None,
+            raw_response={"output": {"status": "ok"}},
+            request_metadata={"run_id": run_id, "case_id": execution.dataset_case.case_key},
+        )
+
+    async def fail_score_persistence(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("score database unavailable")
+
+    monkeypatch.setattr("agent_eval_worker.execution.run_http_agent", fake_http_agent)
+    monkeypatch.setattr(
+        "agent_eval_worker.execution.evaluate_and_persist_scores", fail_score_persistence
+    )
+
+    result = execute_case(session, settings, run_id, execution.case_id)
+
+    assert result["status"] == "failed"
+    session.refresh(execution)
+    assert execution.status == ExecutionStatus.FAILED.value
+    assert execution.error_type == "persistence_error"
+    assert execution.trace_id is not None
+    run = session.get(EvaluationRunRecord, run_id)
+    assert run is not None
+    assert run.status == RunStatus.RUNNING.value
 
 
 def test_cancel_run_marks_pending_cases_and_is_idempotent(
